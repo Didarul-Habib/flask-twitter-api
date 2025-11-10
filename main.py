@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
-import requests, threading, time
+import requests, threading, time, re
 
 app = Flask(__name__)
 client = OpenAI()
@@ -22,9 +22,10 @@ threading.Thread(target=keep_alive, daemon=True).start()
 def home():
     return "✅ Server active and ready."
 
-# -------- COMMENT GENERATOR --------
+# -------- COMMENT GENERATOR (Batch Mode + URL Cleanup) --------
 @app.route("/comment", methods=["GET", "POST"])
 def comment():
+    # accept ?url=...&url=... OR JSON body { "urls": [...] }
     urls = request.args.getlist("url") or (request.json.get("urls", []) if request.is_json else [])
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
@@ -32,67 +33,77 @@ def comment():
     if len(urls) > 5:
         return jsonify({"error": "Maximum 5 links allowed at once."}), 400
 
-    # remove duplicates
-    unique_urls = []
-    duplicates = []
+    # remove duplicates and clean URLs
+    unique_urls, duplicates = [], []
     for u in urls:
-        if u not in unique_urls:
-            unique_urls.append(u)
+        clean_url = re.sub(r'\?.*', '', u.strip())  # remove query params
+        if clean_url not in unique_urls:
+            unique_urls.append(clean_url)
         else:
-            duplicates.append(u)
+            duplicates.append(clean_url)
 
-    results = []
+    # fetch tweet texts
+    tweet_data = []
     for url in unique_urls:
         api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
-        r = requests.get(api_url)
-        data = r.json()
+        try:
+            r = requests.get(api_url, timeout=10)
+            data = r.json()
+            if "text" in data:
+                tweet_data.append({
+                    "url": url,
+                    "author": data.get("user_screen_name", "unknown"),
+                    "tweet_text": data["text"]
+                })
+            else:
+                tweet_data.append({
+                    "url": url,
+                    "error": "⚠️ Could not fetch this tweet (private or deleted)."
+                })
+        except Exception as e:
+            tweet_data.append({"url": url, "error": f"⚠️ Fetch failed: {e}"})
 
-        if "text" not in data:
-            results.append({
-                "url": url,
-                "error": "⚠️ Could not fetch this tweet (private/deleted)."
-            })
-            continue
+    # build one GPT prompt for all fetched tweets
+    prompt = (
+        "Write two short comments (5–10 words each, no emojis, no punctuation).\n"
+        "Each pair must be relevant to its tweet content.\n"
+        "Label each clearly as: Tweet 1:, Tweet 2:, etc.\n\n"
+    )
 
-        tweet_text = data["text"]
-        author = data.get("user_screen_name", "unknown")
+    valid_tweets = [t for t in tweet_data if "tweet_text" in t]
+    for i, t in enumerate(valid_tweets, 1):
+        prompt += f"Tweet {i}: {t['tweet_text']}\n"
 
-        prompt = (
-            f"Read this tweet carefully and write two human-like comments based strictly on its meaning and tone:\n"
-            f"{tweet_text}\n"
-            f"Rules:\n"
-            f"- Each comment must be 5 to 10 words long.\n"
-            f"- Comments must directly reflect the tweet’s content.\n"
-            f"- No emojis, punctuation, hashtags, or quotes.\n"
-            f"- One comment casual, one smart influencer style.\n"
-            f"- Output both comments on separate lines only.\n"
-        )
+    if not valid_tweets:
+        return jsonify({"error": "None of the tweets could be fetched."}), 400
 
+    # one GPT call for all tweets
+    try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
         )
+        gpt_output = response.choices[0].message.content.strip()
+    except Exception as e:
+        return jsonify({"error": f"GPT request failed: {e}"}), 500
 
-        comments = response.choices[0].message.content
-        results.append({
-            "author": author,
-            "url": url,
-            "tweet_text": tweet_text,
-            "comments": comments
-        })
-
-    # -------- CLEAN TEXT OUTPUT --------
+    # format clean output
     formatted_output = ""
-    for i, r in enumerate(results, start=1):
-        formatted_output += f"🔗 {r['url']}\n"
-        if "error" in r:
-            formatted_output += f"{r['error']}\n"
+    for i, t in enumerate(tweet_data, start=1):
+        formatted_output += f"🔗 {t['url']}\n"
+        if "error" in t:
+            formatted_output += f"{t['error']}\n"
         else:
-            formatted_output += f"{r['comments']}\n"
+            section = f"Tweet {i}:"
+            next_section = f"Tweet {i+1}:"
+            start = gpt_output.find(section)
+            end = gpt_output.find(next_section) if next_section in gpt_output else len(gpt_output)
+            comment_block = gpt_output[start:end].replace(section, "").strip() if start != -1 else "(no comment found)"
+            formatted_output += f"{comment_block}\n"
         formatted_output += "─" * 40 + "\n"
 
     return jsonify({
-        "summary": f"Processed {len(results)} tweets.",
+        "summary": f"Processed {len(tweet_data)} tweets.",
         "duplicates_ignored": duplicates,
         "formatted": formatted_output.strip()
     })
