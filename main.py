@@ -1,71 +1,88 @@
-from flask import Flask, request, jsonify
-import requests
-from openai import OpenAI
+from flask import Flask, jsonify, request
+import snscrape.modules.twitter as s
 import re
+from openai import OpenAI
+import os
 
 app = Flask(__name__)
-client = OpenAI()
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# --- Extract Tweet ID
+def extract_tweet_id(url):
+    match = re.search(r"status/(\d+)", url)
+    return match.group(1) if match else None
+
+
+# --- Fetch Tweet Text
+def fetch_tweet_data(url):
+    tweet_id = extract_tweet_id(url)
+    if not tweet_id:
+        return None
+    try:
+        full_url = f"https://x.com/i/web/status/{tweet_id}"
+        scraper = s.TwitterTweetScraper(full_url)
+        tweet = next(scraper.get_items(), None)
+        if tweet:
+            return {"author": tweet.user.username, "content": tweet.content}
+        return None
+    except Exception:
+        return None
+
+
+# --- Generate Comment (4–8 words)
+def generate_comment(tweet):
+    prompt = (
+        f"Write one short human-like comment (4–8 words) "
+        f"based on this tweet by @{tweet['author']}:\n"
+        f"{tweet['content']}\n\n"
+        f"Do not include hashtags, emojis, or quotes."
+    )
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content.strip()
+
+
+# --- Main Route: handle up to 5 URLs
+@app.route("/comment", methods=["POST"])
+def comment_multiple():
+    data = request.get_json()
+    urls = data.get("urls", [])
+
+    if len(urls) == 0:
+        return jsonify({"error": "Please provide at least one URL."}), 400
+    if len(urls) > 5:
+        return jsonify({"error": "You can submit up to 5 links at once."}), 400
+
+    # Duplicate check
+    seen = set()
+    duplicates = [url for url in urls if url in seen or seen.add(url)]
+    if duplicates:
+        return jsonify({
+            "error": f"Duplicate link(s) detected: {', '.join(duplicates)}. Each URL must be unique."
+        }), 400
+
+    comments = []
+    for url in urls:
+        tweet_data = fetch_tweet_data(url)
+        if tweet_data:
+            comments.append(generate_comment(tweet_data))
+        else:
+            comments.append("⚠️ Could not fetch this tweet (private or deleted).")
+
+    return jsonify({"comments": comments})
+
 
 @app.route("/")
 def home():
     return jsonify({
-        "message": "Server is running",
-        "usage": "/comment?url=<tweet_url>"
+        "message": "Server is running 🚀",
+        "usage": "POST /comment with {urls: [tweet_links]}"
     })
-
-@app.route("/comment", methods=["GET"])
-def comment():
-    url = request.args.get("url")
-    if not url:
-        return jsonify({"error": "Missing tweet URL"}), 400
-
-    # --- Fetch tweet text using free vxTwitter API ---
-    try:
-        api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
-        r = requests.get(api_url, timeout=10)
-        data = r.json()
-
-        if "text" not in data or not data["text"]:
-            return jsonify({"error": "Could not fetch tweet content"}), 404
-
-        tweet_text = data["text"]
-        author = data.get("user_screen_name", "unknown")
-    except Exception as e:
-        return jsonify({"error": f"Failed to fetch tweet: {str(e)}"}), 500
-
-    # --- Generate short contextual comments (4–8 words) ---
-    prompt = (
-        "You are a concise, natural commenter. "
-        "Write two separate short comments (each 4–8 words) reacting naturally to this tweet:\n\n"
-        f"Tweet: {tweet_text}\n\n"
-        "Return only the two comments, separated by new lines."
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw_output = response.choices[0].message.content.strip()
-
-        # Extract each line as a separate comment
-        comments = [re.sub(r"^\d+[\.\)]\s*", "", line).strip() 
-                    for line in raw_output.splitlines() if line.strip()]
-        comments = [c for c in comments if 4 <= len(c.split()) <= 8]
-
-        if not comments:
-            comments = ["Nice point!", "Interesting perspective."]
-
-        return jsonify({
-            "author": author,
-            "tweet_text": tweet_text,
-            "comments": comments
-        })
-
-    except Exception as e:
-        return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=10000)
