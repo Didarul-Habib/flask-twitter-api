@@ -23,9 +23,9 @@ def home():
     return "✅ Server active and ready."
 
 # -------- COMMENT GENERATOR --------
-@app.route("/comment", methods=["GET"])
+@app.route("/comment", methods=["GET", "POST"])   # <--- now accepts both
 def comment():
-    urls = request.args.getlist("url")
+    urls = request.args.getlist("url") or request.json.get("urls", [])
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
