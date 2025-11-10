@@ -23,7 +23,7 @@ def home():
     return "✅ Server active and ready."
 
 # -------- COMMENT GENERATOR --------
-@app.route("/comment", methods=["GET", "POST"])   # <--- accepts both
+@app.route("/comment", methods=["GET", "POST"])
 def comment():
     urls = request.args.getlist("url") or (request.json.get("urls", []) if request.is_json else [])
     if not urls:
@@ -58,9 +58,14 @@ def comment():
         author = data.get("user_screen_name", "unknown")
 
         prompt = (
-            f"Write two short comments between 4 and 8 words reacting to this tweet:\n"
+            f"Read this tweet carefully and write two human-like comments based strictly on its meaning and tone:\n"
             f"{tweet_text}\n"
-            f"One casual and one smart influencer style."
+            f"Rules:\n"
+            f"- Each comment must be 5 to 10 words long.\n"
+            f"- Comments must directly reflect the tweet’s content.\n"
+            f"- No emojis, punctuation, hashtags, or quotes.\n"
+            f"- One comment casual, one smart influencer style.\n"
+            f"- Output both comments on separate lines only.\n"
         )
 
         response = client.chat.completions.create(
