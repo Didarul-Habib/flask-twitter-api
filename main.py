@@ -16,7 +16,7 @@ def comment():
     bearer_token = os.environ.get("TWITTER_BEARER_TOKEN")
 
     headers = {"Authorization": f"Bearer {bearer_token}"}
-    api_url = f"https://api.x.com/2/tweets/{tweet_id}?expansions=author_id&tweet.fields=created_at,text&user.fields=username"
+    api_url = f"https://api.twitter.com/2/tweets/{tweet_id}?expansions=author_id&tweet.fields=created_at,text&user.fields=username"
 
     try:
         response = requests.get(api_url, headers=headers)
