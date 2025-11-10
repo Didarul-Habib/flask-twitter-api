@@ -1,79 +1,52 @@
-from flask import Flask, jsonify, request
-import os
-import re
-import requests
+from flask import Flask, request, jsonify
+import snscrape.modules.twitter as sntwitter
 from openai import OpenAI
+import os
 
 app = Flask(__name__)
-
-# Load API keys from environment
-BEARER_TOKEN = os.getenv("BEARER_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-def extract_tweet_id(url):
-    match = re.search(r"status/(\d+)", url)
-    return match.group(1) if match else None
-
-def get_tweet_data(tweet_url):
-    tweet_id = extract_tweet_id(tweet_url)
-    if not tweet_id:
-        return None, {"error": "Invalid tweet URL"}
-
-    headers = {"Authorization": f"Bearer {BEARER_TOKEN}"}
-    api_url = (
-        f"https://api.x.com/2/tweets/{tweet_id}"
-        "?expansions=author_id&tweet.fields=created_at,text&user.fields=username"
-    )
-
-    r = requests.get(api_url, headers=headers)
-    if r.status_code != 200:
-        return None, {"error": "Failed to fetch tweet", "details": r.text}
-    return r.json(), None
-
-@app.route("/")
-def home():
-    return jsonify({
-        "message": "Server is running",
-        "usage": "/comment?url=<tweet_url>"
-    })
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 @app.route("/comment", methods=["GET"])
 def comment():
     url = request.args.get("url")
-    data, error = get_tweet_data(url)
-    if error:
-        return jsonify(error), 400
 
-    tweet_text = data["data"]["text"]
-    author = data["includes"]["users"][0]["username"]
+    # Step 1: Try to scrape the tweet
+    try:
+        tweet = next(sntwitter.TwitterTweetScraper(url).get_items())
+        tweet_text = tweet.rawContent
+        author = tweet.user.username
+    except Exception as e:
+        # Step 2: Handle scraping failure
+        return jsonify({
+            "error": "Could not fetch tweet content.",
+            "details": str(e),
+            "tweet_text": "",
+            "comments": []
+        }), 400
 
-    prompt = f"""Read this tweet by @{author} and write two comments (4–9 words each):
-    1. Casual
-    2. Smart influencer style
-    Keep them natural and human, not robotic.
-    Tweet: {tweet_text}
+    # Step 3: Ask GPT to generate two short comments
+    prompt = f"""
+    Generate 2 short, natural comments (4–8 words) for this tweet:
+    "{tweet_text}"
+
+    Return them in JSON with keys: "Casual" and "Influencer".
     """
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a witty social media commenter."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.8,
-            max_tokens=60
+            messages=[{"role": "user", "content": prompt}]
         )
-
-        reply = response.choices[0].message.content.strip()
-        return jsonify({
-            "tweet_text": tweet_text,
-            "comments": reply
-        })
+        text = response.choices[0].message.content.strip()
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": "Failed to generate comments.",
+            "details": str(e)
+        }), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    # Step 4: Return final structured response
+    return jsonify({
+        "author": author,
+        "tweet_text": tweet_text,
+        "comments": text
+    })
