@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
-import snscrape.modules.twitter as sntwitter
-from openai import OpenAI
+import requests
 import os
+from openai import OpenAI
 
 app = Flask(__name__)
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -9,44 +9,50 @@ client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 @app.route("/comment", methods=["GET"])
 def comment():
     url = request.args.get("url")
+    if not url:
+        return jsonify({"error": "Missing tweet URL"}), 400
 
-    # Step 1: Try to scrape the tweet
+    tweet_id = url.split("/")[-1]
+    bearer_token = os.environ.get("TWITTER_BEARER_TOKEN")
+
+    headers = {"Authorization": f"Bearer {bearer_token}"}
+    api_url = f"https://api.x.com/2/tweets/{tweet_id}?expansions=author_id&tweet.fields=created_at,text&user.fields=username"
+
     try:
-        tweet = next(sntwitter.TwitterTweetScraper(url).get_items())
-        tweet_text = tweet.rawContent
-        author = tweet.user.username
-    except Exception as e:
-        # Step 2: Handle scraping failure
-        return jsonify({
-            "error": "Could not fetch tweet content.",
-            "details": str(e),
-            "tweet_text": "",
-            "comments": []
-        }), 400
+        response = requests.get(api_url, headers=headers)
+        data = response.json()
 
-    # Step 3: Ask GPT to generate two short comments
+        if "data" not in data:
+            return jsonify({"error": "Tweet not found or restricted", "details": data}), 400
+
+        tweet_text = data["data"]["text"]
+        author = data["includes"]["users"][0]["username"]
+    except Exception as e:
+        return jsonify({"error": "Tweet fetch failed", "details": str(e)}), 400
+
+    # Generate 2 short comments (4–8 words)
     prompt = f"""
-    Generate 2 short, natural comments (4–8 words) for this tweet:
+    Write 2 short, natural comments (4–8 words each) for this tweet:
     "{tweet_text}"
 
-    Return them in JSON with keys: "Casual" and "Influencer".
+    Format your reply in JSON like this:
+    {{
+      "Casual": "<comment1>",
+      "Influencer": "<comment2>"
+    }}
     """
 
     try:
-        response = client.chat.completions.create(
+        result = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
         )
-        text = response.choices[0].message.content.strip()
+        comments = result.choices[0].message.content
     except Exception as e:
-        return jsonify({
-            "error": "Failed to generate comments.",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": "Failed to generate comments", "details": str(e)}), 500
 
-    # Step 4: Return final structured response
     return jsonify({
         "author": author,
         "tweet_text": tweet_text,
-        "comments": text
+        "comments": comments
     })
