@@ -1,10 +1,17 @@
 from flask import Flask, request, jsonify
 import requests
-import os
 from openai import OpenAI
+import re
 
 app = Flask(__name__)
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = OpenAI()
+
+@app.route("/")
+def home():
+    return jsonify({
+        "message": "Server is running",
+        "usage": "/comment?url=<tweet_url>"
+    })
 
 @app.route("/comment", methods=["GET"])
 def comment():
@@ -12,47 +19,53 @@ def comment():
     if not url:
         return jsonify({"error": "Missing tweet URL"}), 400
 
-    tweet_id = url.split("/")[-1]
-    bearer_token = os.environ.get("TWITTER_BEARER_TOKEN")
-
-    headers = {"Authorization": f"Bearer {bearer_token}"}
-    api_url = f"https://api.twitter.com/2/tweets/{tweet_id}?expansions=author_id&tweet.fields=created_at,text&user.fields=username"
-
+    # --- Fetch tweet text using free vxTwitter API ---
     try:
-        response = requests.get(api_url, headers=headers)
-        data = response.json()
+        api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
+        r = requests.get(api_url, timeout=10)
+        data = r.json()
 
-        if "data" not in data:
-            return jsonify({"error": "Tweet not found or restricted", "details": data}), 400
+        if "text" not in data or not data["text"]:
+            return jsonify({"error": "Could not fetch tweet content"}), 404
 
-        tweet_text = data["data"]["text"]
-        author = data["includes"]["users"][0]["username"]
+        tweet_text = data["text"]
+        author = data.get("user_screen_name", "unknown")
     except Exception as e:
-        return jsonify({"error": "Tweet fetch failed", "details": str(e)}), 400
+        return jsonify({"error": f"Failed to fetch tweet: {str(e)}"}), 500
 
-    # Generate 2 short comments (4–8 words)
-    prompt = f"""
-    Write 2 short, natural comments (4–8 words each) for this tweet:
-    "{tweet_text}"
-
-    Format your reply in JSON like this:
-    {{
-      "Casual": "<comment1>",
-      "Influencer": "<comment2>"
-    }}
-    """
+    # --- Generate short contextual comments (4–8 words) ---
+    prompt = (
+        "You are a concise, natural commenter. "
+        "Write two separate short comments (each 4–8 words) reacting naturally to this tweet:\n\n"
+        f"Tweet: {tweet_text}\n\n"
+        "Return only the two comments, separated by new lines."
+    )
 
     try:
-        result = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
         )
-        comments = result.choices[0].message.content
-    except Exception as e:
-        return jsonify({"error": "Failed to generate comments", "details": str(e)}), 500
 
-    return jsonify({
-        "author": author,
-        "tweet_text": tweet_text,
-        "comments": comments
-    })
+        raw_output = response.choices[0].message.content.strip()
+
+        # Extract each line as a separate comment
+        comments = [re.sub(r"^\d+[\.\)]\s*", "", line).strip() 
+                    for line in raw_output.splitlines() if line.strip()]
+        comments = [c for c in comments if 4 <= len(c.split()) <= 8]
+
+        if not comments:
+            comments = ["Nice point!", "Interesting perspective."]
+
+        return jsonify({
+            "author": author,
+            "tweet_text": tweet_text,
+            "comments": comments
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
