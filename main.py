@@ -23,9 +23,9 @@ def home():
     return "✅ Server active and ready."
 
 # -------- COMMENT GENERATOR --------
-@app.route("/comment", methods=["GET", "POST"])   # <--- now accepts both
+@app.route("/comment", methods=["GET", "POST"])   # <--- accepts both
 def comment():
-    urls = request.args.getlist("url") or request.json.get("urls", [])
+    urls = request.args.getlist("url") or (request.json.get("urls", []) if request.is_json else [])
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
@@ -76,10 +76,20 @@ def comment():
             "comments": comments
         })
 
+    # -------- CLEAN TEXT OUTPUT --------
+    formatted_output = ""
+    for i, r in enumerate(results, start=1):
+        formatted_output += f"🔗 {r['url']}\n"
+        if "error" in r:
+            formatted_output += f"{r['error']}\n"
+        else:
+            formatted_output += f"{r['comments']}\n"
+        formatted_output += "─" * 40 + "\n"
+
     return jsonify({
-        "total": len(results),
+        "summary": f"Processed {len(results)} tweets.",
         "duplicates_ignored": duplicates,
-        "results": results
+        "formatted": formatted_output.strip()
     })
 
 
