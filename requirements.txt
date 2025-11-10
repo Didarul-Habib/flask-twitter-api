@@ -1,3 +1,4 @@
 flask
 snscrape
 gunicorn
+openai>=1.2.0
