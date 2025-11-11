@@ -1,11 +1,9 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
-import requests, re, threading, time, os
+import requests, threading, time
 
 app = Flask(__name__)
-
-# Initialize OpenAI with env var
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI()
 
 # -------- KEEP SERVER AWAKE --------
 def keep_alive():
@@ -22,12 +20,13 @@ threading.Thread(target=keep_alive, daemon=True).start()
 # -------- HOME ROUTE --------
 @app.route("/")
 def home():
-    return "✅ Server active and ready."
+    return jsonify({"status": "✅ CrownTALK active and ready."})
+
 
 # -------- COMMENT GENERATOR --------
 @app.route("/comment", methods=["GET", "POST"])
 def comment():
-    urls = request.args.getlist("url") or request.json.get("urls", [])
+    urls = request.args.getlist("url") or (request.json.get("urls", []) if request.is_json else [])
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
@@ -35,72 +34,93 @@ def comment():
         return jsonify({"error": "Maximum 5 links allowed at once."}), 400
 
     # remove duplicates
-    unique_urls, duplicates = [], []
+    unique_urls = []
+    duplicates = []
     for u in urls:
-        clean_url = re.sub(r'\?.*', '', u.strip())  # clean tracking params
-        if clean_url not in unique_urls:
-            unique_urls.append(clean_url)
+        if u not in unique_urls:
+            unique_urls.append(u)
         else:
-            duplicates.append(clean_url)
+            duplicates.append(u)
 
     results = []
     for url in unique_urls:
+        api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
         try:
-            api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
-            r = requests.get(api_url)
+            r = requests.get(api_url, timeout=10)
             data = r.json()
+        except Exception as e:
+            results.append({
+                "url": url,
+                "error": f"⚠️ Could not fetch tweet: {str(e)}"
+            })
+            continue
 
-            if "text" not in data:
-                results.append({
-                    "url": url,
-                    "error": "⚠️ Could not fetch this tweet (private/deleted)."
-                })
-                continue
+        if "text" not in data:
+            results.append({
+                "url": url,
+                "error": "⚠️ Could not fetch this tweet (private/deleted)."
+            })
+            continue
 
-            tweet_text = data["text"]
-            author = data.get("user_screen_name", "unknown")
+        tweet_text = data["text"]
+        author = data.get("user_screen_name", "unknown")
 
-            # --- Refined prompt for influencer tone ---
-            prompt = (
-                f"You are a human social media user writing natural short reactions.\n"
-                f"Generate TWO distinct comments (5–10 words each) reacting to this tweet:\n"
-                f"---\n{tweet_text}\n---\n"
-                f"Rules:\n"
-                f"- Sound like a smart creator or influencer online.\n"
-                f"- Use modern slang when natural (rn, fr, tbh, btw, lowkey, etc.).\n"
-                f"- Never repeat word choice, rhythm, or structure.\n"
-                f"- No emojis, punctuation, hashtags, or quotes.\n"
-                f"- Each comment must be unique and spontaneous.\n"
-                f"- Avoid generic filler words like impressive, amazing, great.\n"
-            )
+        # --- smarter prompt for realism and variation ---
+        prompt = f"""
+You are a social media user who writes natural, human-like comments — not robotic or repetitive.
+Read the following tweet and create **two** unique, short, casual reactions.
 
+Rules:
+- Each comment must be 5–10 words.
+- No emojis, hashtags, or punctuation except periods.
+- Avoid starting comments with the same few words (like Love, Finally, This, Lowkey, etc).
+- Avoid repeated tone or structure across comments.
+- Use slang like "fr", "tbh", "ngl", "rn" naturally if it fits.
+- Comments must sound like two different real people.
+- Base both on the actual tweet context.
+
+Tweet:
+{tweet_text}
+
+Give your answer in JSON like this:
+{{"comments": ["comment one", "comment two"]}}
+"""
+
+        try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
+                temperature=0.9,
             )
 
-            comments = response.choices[0].message.content.strip()
+            raw_output = response.choices[0].message.content.strip()
+
+            # Extract comments safely
+            import json
+            try:
+                parsed = json.loads(raw_output)
+                comments = parsed.get("comments", [])
+            except Exception:
+                # fallback if not valid JSON
+                comments = [c.strip() for c in raw_output.split("\n") if c.strip()]
+
             results.append({
                 "author": author,
                 "url": url,
                 "tweet_text": tweet_text,
-                "comments": comments
+                "comments": comments[:2]  # ensure only 2
             })
 
         except Exception as e:
-            results.append({"url": url, "error": str(e)})
-
-    # -------- CLEAN OUTPUT --------
-    formatted_output = ""
-    for r in results:
-        formatted_output += f"🔗 {r['url']}\n"
-        formatted_output += f"{r.get('comments', r.get('error'))}\n"
-        formatted_output += "─" * 40 + "\n"
+            results.append({
+                "url": url,
+                "error": f"⚠️ GPT generation failed: {str(e)}"
+            })
 
     return jsonify({
         "summary": f"Processed {len(results)} tweets.",
         "duplicates_ignored": duplicates,
-        "formatted": formatted_output.strip()
+        "results": results
     })
 
 
