@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
-import requests, re, threading, time
+import requests, re, threading, time, os
 
 app = Flask(__name__)
-client = OpenAI()
+
+# Initialize OpenAI with env var
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # -------- KEEP SERVER AWAKE --------
 def keep_alive():
@@ -33,8 +35,7 @@ def comment():
         return jsonify({"error": "Maximum 5 links allowed at once."}), 400
 
     # remove duplicates
-    unique_urls = []
-    duplicates = []
+    unique_urls, duplicates = [], []
     for u in urls:
         clean_url = re.sub(r'\?.*', '', u.strip())  # clean tracking params
         if clean_url not in unique_urls:
@@ -59,18 +60,18 @@ def comment():
             tweet_text = data["text"]
             author = data.get("user_screen_name", "unknown")
 
-            # --- Prompt with smart influencer tone ---
+            # --- Refined prompt for influencer tone ---
             prompt = (
-                f"You are a human social media user creating natural, short reactions.\n"
+                f"You are a human social media user writing natural short reactions.\n"
                 f"Generate TWO distinct comments (5–10 words each) reacting to this tweet:\n"
                 f"---\n{tweet_text}\n---\n"
-                f"Comments must:\n"
-                f"- Sound like a smart online creator or influencer.\n"
-                f"- Use modern internet slang only when natural (rn, tbh, fr, btw, lowkey, etc.).\n"
-                f"- Never repeat words or sentence patterns between comments.\n"
-                f"- Each comment must feel unique, spontaneous, and human.\n"
-                f"- No emojis, punctuation, hashtags, or quotation marks.\n"
-                f"- Absolutely avoid generic or repetitive structures.\n"
+                f"Rules:\n"
+                f"- Sound like a smart creator or influencer online.\n"
+                f"- Use modern slang when natural (rn, fr, tbh, btw, lowkey, etc.).\n"
+                f"- Never repeat word choice, rhythm, or structure.\n"
+                f"- No emojis, punctuation, hashtags, or quotes.\n"
+                f"- Each comment must be unique and spontaneous.\n"
+                f"- Avoid generic filler words like impressive, amazing, great.\n"
             )
 
             response = client.chat.completions.create(
@@ -91,12 +92,9 @@ def comment():
 
     # -------- CLEAN OUTPUT --------
     formatted_output = ""
-    for i, r in enumerate(results, start=1):
+    for r in results:
         formatted_output += f"🔗 {r['url']}\n"
-        if "error" in r:
-            formatted_output += f"{r['error']}\n"
-        else:
-            formatted_output += f"{r['comments']}\n"
+        formatted_output += f"{r.get('comments', r.get('error'))}\n"
         formatted_output += "─" * 40 + "\n"
 
     return jsonify({
