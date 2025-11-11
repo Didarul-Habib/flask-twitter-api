@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
-import requests, threading, time
+import requests, re, threading, time
 
 app = Flask(__name__)
 client = OpenAI()
@@ -25,7 +25,7 @@ def home():
 # -------- COMMENT GENERATOR --------
 @app.route("/comment", methods=["GET", "POST"])
 def comment():
-    urls = request.args.getlist("url") or (request.json.get("urls", []) if request.is_json else [])
+    urls = request.args.getlist("url") or request.json.get("urls", [])
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
@@ -36,7 +36,7 @@ def comment():
     unique_urls = []
     duplicates = []
     for u in urls:
-        clean_url = u.split("?")[0]
+        clean_url = re.sub(r'\?.*', '', u.strip())  # clean tracking params
         if clean_url not in unique_urls:
             unique_urls.append(clean_url)
         else:
@@ -45,9 +45,8 @@ def comment():
     results = []
     for url in unique_urls:
         try:
-            start_time = time.time()
-            api_url = f"https://api.vxtwitter.com/{url.replace('https://', '').replace('http://', '')}"
-            r = requests.get(api_url, timeout=15)
+            api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
+            r = requests.get(api_url)
             data = r.json()
 
             if "text" not in data:
@@ -60,14 +59,18 @@ def comment():
             tweet_text = data["text"]
             author = data.get("user_screen_name", "unknown")
 
+            # --- Prompt with smart influencer tone ---
             prompt = (
-                "For the following tweet, write two unique, human-sounding comments (5–10 words each).\n"
-                "Each comment must be contextually relevant, natural, and conversational.\n"
-                "Do NOT follow a pattern — vary tone, structure, and phrasing.\n"
-                "Avoid repetition of words or ideas across comments.\n"
-                "No emojis, no punctuation, no hashtags, no quotes, no marketing tone.\n"
-                "Comments should feel spontaneous, like real people reacting differently.\n\n"
-                f"Tweet: {tweet_text}\n"
+                f"You are a human social media user creating natural, short reactions.\n"
+                f"Generate TWO distinct comments (5–10 words each) reacting to this tweet:\n"
+                f"---\n{tweet_text}\n---\n"
+                f"Comments must:\n"
+                f"- Sound like a smart online creator or influencer.\n"
+                f"- Use modern internet slang only when natural (rn, tbh, fr, btw, lowkey, etc.).\n"
+                f"- Never repeat words or sentence patterns between comments.\n"
+                f"- Each comment must feel unique, spontaneous, and human.\n"
+                f"- No emojis, punctuation, hashtags, or quotation marks.\n"
+                f"- Absolutely avoid generic or repetitive structures.\n"
             )
 
             response = client.chat.completions.create(
@@ -75,26 +78,16 @@ def comment():
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            duration = round(time.time() - start_time, 1)
             comments = response.choices[0].message.content.strip()
             results.append({
                 "author": author,
                 "url": url,
                 "tweet_text": tweet_text,
-                "comments": comments,
-                "processing_time_sec": duration
+                "comments": comments
             })
 
-        except requests.exceptions.Timeout:
-            results.append({
-                "url": url,
-                "error": "⚠️ Request took too long — skipped this tweet."
-            })
         except Exception as e:
-            results.append({
-                "url": url,
-                "error": f"⚠️ Error processing tweet: {str(e)}"
-            })
+            results.append({"url": url, "error": str(e)})
 
     # -------- CLEAN OUTPUT --------
     formatted_output = ""
@@ -104,7 +97,6 @@ def comment():
             formatted_output += f"{r['error']}\n"
         else:
             formatted_output += f"{r['comments']}\n"
-            formatted_output += f"(⏱ {r['processing_time_sec']}s)\n"
         formatted_output += "─" * 40 + "\n"
 
     return jsonify({
