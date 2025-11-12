@@ -5,9 +5,17 @@ import requests, threading, time, random
 app = Flask(__name__)
 client = OpenAI()
 
-progress_state = {"current_batch": 0, "total_batches": 0, "eta_seconds": 0, "percent_done": 0, "status": "idle"}
+# -------------------- GLOBAL STATUS --------------------
+progress_state = {
+    "status": "idle",
+    "current_batch": 0,
+    "total_batches": 0,
+    "percent_done": 0,
+    "eta_seconds": 0
+}
 
-# ----------------- Keep Server Alive -----------------
+
+# -------------------- KEEP SERVER ALIVE --------------------
 def keep_alive():
     while True:
         try:
@@ -20,7 +28,7 @@ def keep_alive():
 threading.Thread(target=keep_alive, daemon=True).start()
 
 
-# ----------------- Auto Log Cleanup -----------------
+# -------------------- LOG CLEANUP EVERY 12H --------------------
 def clear_logs_every_12h():
     while True:
         try:
@@ -33,12 +41,13 @@ def clear_logs_every_12h():
 threading.Thread(target=clear_logs_every_12h, daemon=True).start()
 
 
+# -------------------- HEALTH ROUTE --------------------
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "message": "CrownTalk is alive"}), 200
 
 
-# ----------------- Retry Logic for Fetch -----------------
+# -------------------- FETCH TWEET DATA --------------------
 def fetch_tweet_data(url, retries=3):
     api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
     backoff = 1
@@ -53,11 +62,11 @@ def fetch_tweet_data(url, retries=3):
         except Exception as e:
             print(f"❌ Fetch error ({attempt+1}): {e}")
         time.sleep(backoff)
-        backoff *= 2  # exponential wait
+        backoff *= 2
     return None
 
 
-# ----------------- Retry Logic for GPT -----------------
+# -------------------- GENERATE COMMENTS (GPT) --------------------
 def generate_comments_with_retry(prompt, retries=3):
     backoff = 2
     for attempt in range(retries):
@@ -65,7 +74,7 @@ def generate_comments_with_retry(prompt, retries=3):
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=random.uniform(1.2, 1.6),
+                temperature=random.uniform(1.1, 1.5),
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
@@ -75,13 +84,14 @@ def generate_comments_with_retry(prompt, retries=3):
     return None
 
 
-# ----------------- Main Comment Endpoint -----------------
-@app.route("/comment", methods=["GET", "POST"])
+# -------------------- COMMENT ENDPOINT --------------------
+@app.route("/comment", methods=["POST"])
 def comment():
-    urls = request.args.getlist("url") or request.json.get("urls", [])
+    urls = request.json.get("urls", [])
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
+    # Deduplicate URLs
     unique_urls, duplicates = [], []
     for u in urls:
         if u not in unique_urls:
@@ -91,45 +101,56 @@ def comment():
 
     results = []
     batch_size = 4
+    total_batches = (len(unique_urls) + batch_size - 1) // batch_size
+
     progress_state.update({
         "status": "running",
         "current_batch": 0,
-        "total_batches": (len(unique_urls) + batch_size - 1) // batch_size,
+        "total_batches": total_batches,
         "percent_done": 0
     })
 
     start_time = time.time()
+    avg_tweet_time = 6  # average seconds per tweet
 
     for i in range(0, len(unique_urls), batch_size):
         batch = unique_urls[i:i + batch_size]
         progress_state["current_batch"] = i // batch_size + 1
 
         for url in batch:
+            time.sleep(random.uniform(2, 4))  # Avoid API rate limit
             data = fetch_tweet_data(url)
             if not data:
-                results.append({"url": url, "error": "⚠️ Could not fetch tweet (private/deleted)."})
+                results.append({
+                    "url": url,
+                    "error": "⚠️ Could not fetch tweet (private/deleted)."
+                })
                 continue
 
             tweet_text = data["text"]
             author = data.get("user_screen_name", "unknown")
 
             prompt = f"""
-Generate two short, natural, non-repetitive comments (5–10 words) reacting to this tweet:
+Generate two short, humanlike, natural comments (5–10 words max) reacting to this tweet.
 
 Tweet:
 {tweet_text}
 
 Rules:
-- No punctuation or emojis
-- Avoid overused words like finally, curious, love that, this, amazing, etc
-- Each comment should sound like a real human (casual, witty, confident, chill, or short influencer tone)
-- Never repeat structure or phrasing across comments
-Output comments on separate lines only
+- No punctuation, emojis, or symbols
+- Avoid words like finally, curious, love that, this, amazing
+- No repetitive phrasing or identical tone
+- Sound authentic, confident, thoughtful, or casual
+- Each comment must feel unique
+Output each comment on a new line only
 """
 
             comments = generate_comments_with_retry(prompt)
             if not comments:
-                results.append({"url": url, "error": "⚠️ GPT temporarily unavailable, try again."})
+                results.append({
+                    "url": url,
+                    "error": "⚠️ GPT temporarily unavailable, try again."
+                })
                 continue
 
             results.append({
@@ -140,11 +161,15 @@ Output comments on separate lines only
             })
 
         progress_state["percent_done"] = round(
-            (progress_state["current_batch"] / progress_state["total_batches"]) * 100, 1
+            (progress_state["current_batch"] / total_batches) * 100, 1
+        )
+        progress_state["eta_seconds"] = int(
+            (total_batches - progress_state["current_batch"]) * batch_size * avg_tweet_time
         )
 
     duration = round(time.time() - start_time, 2)
     progress_state["status"] = "complete"
+    progress_state["eta_seconds"] = 0
 
     formatted_output = ""
     for r in results:
@@ -163,5 +188,18 @@ Output comments on separate lines only
     })
 
 
+# -------------------- STATUS ENDPOINT --------------------
+@app.route("/status", methods=["GET"])
+def status():
+    return jsonify({
+        "status": progress_state["status"],
+        "current_batch": progress_state["current_batch"],
+        "total_batches": progress_state["total_batches"],
+        "percent_done": progress_state["percent_done"],
+        "eta_seconds": progress_state["eta_seconds"]
+    })
+
+
+# -------------------- RUN APP --------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
