@@ -5,19 +5,19 @@ import requests, threading, time, random, math
 app = Flask(__name__)
 client = OpenAI()
 
-# ---------- KEEP SERVER AWAKE ----------
+# -------- KEEP SERVER AWAKE --------
 def keep_alive():
     while True:
         try:
             requests.get("https://flask-twitter-api.onrender.com/")
-            print("Ping sent to keep server awake.")
+            print("✅ Ping sent to keep server awake.")
         except Exception as e:
-            print("Ping failed:", e)
-        time.sleep(15 * 60)  # every 15 minutes
+            print("⚠️ Ping failed:", e)
+        time.sleep(15 * 60)  # every 15 min
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-# ---------- COMMENT GENERATOR WITH RETRY ----------
+# -------- COMMENT GENERATOR WITH RETRY --------
 def generate_comments_with_retry(prompt, max_retries=4):
     delay = 4
     for attempt in range(max_retries):
@@ -31,23 +31,22 @@ def generate_comments_with_retry(prompt, max_retries=4):
         except Exception as e:
             print(f"⚠️ Attempt {attempt + 1}/{max_retries} failed: {e}")
             if "429" in str(e):
-                # API rate limit — wait longer
                 wait = delay * (2 ** attempt) + random.uniform(3, 5)
-                print(f"Rate limited. Retrying in {wait:.1f}s...")
+                print(f"⏳ Rate limited. Retrying in {wait:.1f}s...")
                 time.sleep(wait)
             else:
                 time.sleep(random.uniform(2, 5))
-    print("❌ Max retries reached. Skipping.")
+    print("❌ Max retries reached. Skipping this tweet.")
     return None
 
 
-# ---------- HOME ----------
+# -------- HOME ROUTE --------
 @app.route("/")
 def home():
-    return "✅ CrownTALK AI — optimized and live."
+    return "✅ CrownTALK AI — running smoothly and optimized."
 
 
-# ---------- COMMENT ROUTE ----------
+# -------- COMMENT ENDPOINT --------
 @app.route("/comment", methods=["POST"])
 def comment():
     data = request.json
@@ -55,7 +54,7 @@ def comment():
     if not all_urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
-    batch_size = 1  # safest for Render free
+    batch_size = 1   # keep small for memory safety
     total_batches = math.ceil(len(all_urls) / batch_size)
 
     all_results = []
@@ -84,15 +83,15 @@ def comment():
             author = data.get("user_screen_name", "unknown")
 
             prompt = (
-                f"Generate two natural, human-like short comments (5–10 words each) about this tweet:\n"
+                f"Generate two unique human-like short comments (5–10 words each) reacting to this tweet:\n"
                 f"---\n{tweet_text}\n---\n"
                 f"Rules:\n"
-                f"- No emojis or punctuation (.,!?).\n"
-                f"- No repetitive starts like love this, finally, feels, excited, skip, curious.\n"
-                f"- Must sound unique and human — not similar tone.\n"
-                f"- Avoid same phrases across multiple comments.\n"
-                f"- Randomly use slang (fr, tbh, rn, lowkey) but not always.\n"
-                f"- Do not repeat structure between comments.\n"
+                f"- No emojis, punctuation (.,!?), or hashtags.\n"
+                f"- Avoid same tone or pattern.\n"
+                f"- Avoid repetitive words like love, feels, excited, finally, curious, this.\n"
+                f"- Must sound real, natural, and varied.\n"
+                f"- Randomly use slang like fr, rn, tbh, lowkey but not always.\n"
+                f"- No repetitive structure or endings.\n"
             )
 
             comments = generate_comments_with_retry(prompt)
@@ -105,22 +104,23 @@ def comment():
             else:
                 failed_links.append(url)
 
-            time.sleep(random.uniform(1.5, 3))  # lighter sleep between requests
+            time.sleep(random.uniform(1.5, 3))  # pause slightly between calls
 
-        # rest between batches (keep Render stable)
+        # Cooldown between batches
         if batch_index < total_batches - 1:
-            rest_time = random.uniform(5, 8)
-            print(f"Batch {batch_index + 1} done. Cooling for {rest_time:.1f}s.")
+            rest_time = random.uniform(6, 10)
+            print(f"🕐 Cooling down for {rest_time:.1f}s.")
             time.sleep(rest_time)
 
+    # -------- SAFE, LIGHT RESPONSE --------
     formatted_output = ""
     for r in all_results:
         formatted_output += f"🔗 {r['url']}\n{r['comments']}\n{'─' * 40}\n"
 
     return jsonify({
-        "summary": f"✅ Done! {len(all_results)} tweets processed. {len(failed_links)} failed.",
-        "failed_links": failed_links,
-        "formatted": formatted_output.strip()
+        "summary": f"✅ {len(all_results)} tweets processed. {len(failed_links)} failed.",
+        "failed_links": failed_links[-5:],  # show only last few
+        "formatted": formatted_output[-2000:]  # trim to avoid memory crash
     })
 
 
