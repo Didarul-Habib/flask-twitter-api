@@ -1,11 +1,11 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
-import requests, threading, time, random, math
+import requests, threading, time, random, math, gc
 
 app = Flask(__name__)
 client = OpenAI()
 
-# -------- KEEP SERVER AWAKE --------
+# ---------- KEEP SERVER AWAKE ----------
 def keep_alive():
     while True:
         try:
@@ -17,51 +17,51 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-# -------- COMMENT GENERATOR WITH RETRY --------
-def generate_comments_with_retry(prompt, max_retries=4):
-    delay = 4
+
+# ---------- COMMENT GENERATOR ----------
+def generate_comments_with_retry(prompt, max_retries=5):
+    delay = 5
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                timeout=50,
+                timeout=60,
             )
-            return response.choices[0].message.content.strip()
+            text = response.choices[0].message.content.strip()
+            return text
         except Exception as e:
             print(f"⚠️ Attempt {attempt + 1}/{max_retries} failed: {e}")
-            if "429" in str(e):
-                wait = delay * (2 ** attempt) + random.uniform(3, 5)
+            if "429" in str(e) or "Rate limit" in str(e):
+                wait = delay * (2 ** attempt) + random.uniform(3, 6)
                 print(f"⏳ Rate limited. Retrying in {wait:.1f}s...")
                 time.sleep(wait)
             else:
-                time.sleep(random.uniform(2, 5))
-    print("❌ Max retries reached. Skipping this tweet.")
+                time.sleep(random.uniform(3, 6))
+    print("❌ Max retries reached, skipping this one.")
     return None
 
 
-# -------- HOME ROUTE --------
+# ---------- HOME ----------
 @app.route("/")
 def home():
-    return "✅ CrownTALK AI — running smoothly and optimized."
+    return "✅ CrownTALK — Comment engine stable & optimized."
 
 
-# -------- COMMENT ENDPOINT --------
+# ---------- COMMENT ENDPOINT ----------
 @app.route("/comment", methods=["POST"])
 def comment():
     data = request.json
-    all_urls = data.get("urls", [])
-    if not all_urls:
+    urls = data.get("urls", [])
+    if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
-    batch_size = 1   # keep small for memory safety
-    total_batches = math.ceil(len(all_urls) / batch_size)
-
-    all_results = []
-    failed_links = []
+    batch_size = 2
+    total_batches = math.ceil(len(urls) / batch_size)
+    all_results, failed_links = [], []
 
     for batch_index in range(total_batches):
-        batch_urls = all_urls[batch_index * batch_size:(batch_index + 1) * batch_size]
+        batch_urls = urls[batch_index * batch_size:(batch_index + 1) * batch_size]
         print(f"🚀 Processing batch {batch_index + 1}/{total_batches}: {batch_urls}")
 
         for url in batch_urls:
@@ -75,7 +75,6 @@ def comment():
                 continue
 
             if "text" not in data:
-                print(f"⚠️ No text found for {url}")
                 failed_links.append(url)
                 continue
 
@@ -83,44 +82,79 @@ def comment():
             author = data.get("user_screen_name", "unknown")
 
             prompt = (
-                f"Generate two unique human-like short comments (5–10 words each) reacting to this tweet:\n"
+                f"Write two different short human-like comments (5–10 words each) reacting to this tweet:\n"
                 f"---\n{tweet_text}\n---\n"
                 f"Rules:\n"
-                f"- No emojis, punctuation (.,!?), or hashtags.\n"
-                f"- Avoid same tone or pattern.\n"
-                f"- Avoid repetitive words like love, feels, excited, finally, curious, this.\n"
-                f"- Must sound real, natural, and varied.\n"
-                f"- Randomly use slang like fr, rn, tbh, lowkey but not always.\n"
-                f"- No repetitive structure or endings.\n"
+                f"- No emojis, punctuation, hashtags, or quotes.\n"
+                f"- Avoid repetitive tone or structure.\n"
+                f"- Avoid words like love, feels, excited, finally, curious, this, looks, amazing.\n"
+                f"- Each comment must sound natural, unique, and casual.\n"
+                f"- Randomly use slang like rn, tbh, lowkey, fr, ngl—but not always.\n"
+                f"- Never repeat the same phrasing across tweets."
             )
 
-            comments = generate_comments_with_retry(prompt)
-            if comments:
+            comment_text = generate_comments_with_retry(prompt)
+            if comment_text:
                 all_results.append({
                     "author": author,
                     "url": url,
-                    "comments": comments
+                    "comments": comment_text
                 })
             else:
                 failed_links.append(url)
 
-            time.sleep(random.uniform(1.5, 3))  # pause slightly between calls
+            time.sleep(random.uniform(1.5, 3))
+            gc.collect()
 
         # Cooldown between batches
         if batch_index < total_batches - 1:
-            rest_time = random.uniform(6, 10)
-            print(f"🕐 Cooling down for {rest_time:.1f}s.")
+            rest_time = random.uniform(8, 12)
+            print(f"🕐 Cooling down for {rest_time:.1f}s...")
             time.sleep(rest_time)
 
-    # -------- SAFE, LIGHT RESPONSE --------
+    # Retry failed ones once
+    if failed_links:
+        print("🔁 Retrying failed links...")
+        retry_results, still_failed = [], []
+        for url in failed_links:
+            try:
+                api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
+                r = requests.get(api_url, timeout=12)
+                data = r.json()
+                if "text" not in data:
+                    still_failed.append(url)
+                    continue
+
+                tweet_text = data["text"]
+                prompt = (
+                    f"Write two distinct short human-like comments (5–10 words each) reacting to:\n"
+                    f"{tweet_text}\n"
+                    f"No emojis, hashtags, or punctuation. No repeating words or tone."
+                )
+
+                comment_text = generate_comments_with_retry(prompt)
+                if comment_text:
+                    retry_results.append({
+                        "url": url,
+                        "comments": comment_text
+                    })
+                else:
+                    still_failed.append(url)
+            except Exception as e:
+                print(f"⚠️ Retry failed for {url}: {e}")
+                still_failed.append(url)
+
+        all_results.extend(retry_results)
+        failed_links = still_failed
+
     formatted_output = ""
     for r in all_results:
         formatted_output += f"🔗 {r['url']}\n{r['comments']}\n{'─' * 40}\n"
 
     return jsonify({
-        "summary": f"✅ {len(all_results)} tweets processed. {len(failed_links)} failed.",
-        "failed_links": failed_links[-5:],  # show only last few
-        "formatted": formatted_output[-2000:]  # trim to avoid memory crash
+        "summary": f"✅ {len(all_results)} tweets processed. {len(failed_links)} failed after retry.",
+        "failed_links": failed_links,
+        "formatted": formatted_output[-2000:]
     })
 
 
