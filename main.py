@@ -1,53 +1,41 @@
-from flask import Flask, request, jsonify, stream_with_context, Response
+from flask import Flask, request, jsonify, Response, stream_with_context
+import requests
+import time
+import random
+import os
 from openai import OpenAI
-import requests, threading, time, random, gc, json
 
 app = Flask(__name__)
-client = OpenAI()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ---------- KEEP SERVER AWAKE ----------
-def keep_alive():
-    while True:
-        try:
-            requests.get("https://flask-twitter-api.onrender.com/")
-            print("✅ Ping sent to keep server awake.")
-        except Exception as e:
-            print("⚠️ Ping failed:", e)
-        time.sleep(15 * 60)
-
-threading.Thread(target=keep_alive, daemon=True).start()
-
-
-# ---------- COMMENT GENERATOR ----------
-def generate_comments_with_retry(prompt, max_retries=5):
-    delay = 5
-    for attempt in range(max_retries):
+# ---------- Comment Generator (with Retry) ----------
+def generate_comments_with_retry(prompt, retries=3, delay=5):
+    for attempt in range(retries):
         try:
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                timeout=60,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are CrownTALK, an AI trained to write natural, human-like X (Twitter) comments. "
+                            "You NEVER use cliché or repetitive phrasing."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.95,
+                max_tokens=70,
             )
-            return response.choices[0].message.content.strip()
+            text = response.choices[0].message.content.strip()
+            return text.replace("\n\n", "\n").strip()
         except Exception as e:
-            print(f"⚠️ Attempt {attempt + 1}/{max_retries} failed: {e}")
-            if "429" in str(e) or "Rate limit" in str(e):
-                wait = delay * (2 ** attempt) + random.uniform(3, 6)
-                print(f"⏳ Rate limited. Retrying in {wait:.1f}s...")
-                time.sleep(wait)
-            else:
-                time.sleep(random.uniform(3, 6))
-    print("❌ Max retries reached, skipping.")
+            print(f"⚠️ Error generating comment (attempt {attempt+1}): {e}")
+            time.sleep(delay + random.uniform(2, 6))
     return None
 
 
-# ---------- HOME ----------
-@app.route("/")
-def home():
-    return "✅ CrownTALK — auto-batching, stable, and human-style comment engine is live."
-
-
-# ---------- COMMENT ENDPOINT ----------
+# ---------- /comment Route ----------
 @app.route("/comment", methods=["POST"])
 def comment():
     data = request.json
@@ -61,60 +49,73 @@ def comment():
     total_batches = len(chunks)
 
     def generate():
-        all_results = []
         failed_links = []
 
-        for batch_index, batch_urls in enumerate(chunks):
-            print(f"🚀 Processing batch {batch_index + 1}/{total_batches}: {batch_urls}")
-            batch_output = ""
+        for i, batch_urls in enumerate(chunks):
+            print(f"🚀 Processing batch {i + 1}/{total_batches}: {batch_urls}")
+            batch_output = []
 
             for url in batch_urls:
                 try:
                     api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
                     r = requests.get(api_url, timeout=12)
+                    if r.status_code != 200:
+                        failed_links.append(url)
+                        continue
+
                     data = r.json()
+                    tweet_text = data.get("text", None)
+                    if not tweet_text:
+                        failed_links.append(url)
+                        continue
                 except Exception as e:
+                    print(f"❌ Error fetching tweet {url}: {e}")
                     failed_links.append(url)
                     continue
 
-                if "text" not in data:
-                    failed_links.append(url)
-                    continue
-
-                tweet_text = data["text"]
-
+                # --- Improved prompt ---
                 prompt = (
-                    f"Write two short, unique, human-like comments (5–10 words each) reacting to this tweet:\n"
-                    f"---\n{tweet_text}\n---\n"
-                    f"Rules:\n"
-                    f"- No emojis, punctuation, hashtags, or quotes.\n"
-                    f"- Avoid repetitive tone, phrasing, or structure.\n"
-                    f"- Avoid words: love, feels, excited, finally, curious, this, looks, amazing, skip, feels like.\n"
-                    f"- Use slang sparingly (rn, tbh, lowkey, fr, ngl).\n"
-                    f"- Must sound casual and distinct.\n"
-                    f"- Must end cleanly without punctuation."
+                    f"Write two short human-like comments (5–10 words each) reacting to this tweet:\n"
+                    f"{tweet_text}\n\n"
+                    f"STRICT RULES:\n"
+                    f"- Each must sound natural, different tone and flow.\n"
+                    f"- No clichés like 'game changer', 'finally', 'can't wait', 'love this', 'amazing', "
+                    f"'excited', 'revolutionary', 'huge', 'incredible'.\n"
+                    f"- Avoid starting with: 'This', 'Such', 'Love', 'Finally', or 'Looks'.\n"
+                    f"- No emojis, punctuation, hashtags, or exclamation marks.\n"
+                    f"- Never use repetitive words or similar structure.\n"
+                    f"- Keep it casual, realistic, short — like genuine X users chatting."
                 )
 
                 comments = generate_comments_with_retry(prompt)
                 if comments:
-                    result = f"🔗 [{url}]({url})\n{comments}\n{'─' * 40}\n"
-                    all_results.append(result)
-                    batch_output += result
+                    formatted_comments = comments.strip()
+                    batch_output.append(f"🔗 {url}\n{formatted_comments}\n{'─' * 35}")
                 else:
                     failed_links.append(url)
 
+                # random rest between tweets
                 time.sleep(random.uniform(1.5, 3))
-                gc.collect()
 
-            yield f"Batch {batch_index + 1}/{total_batches} complete:\n{batch_output}\n"
-            time.sleep(random.uniform(8, 12))  # cooldown
+            # send per-batch results
+            yield f"\n✅ Batch {i + 1}/{total_batches} complete:\n" + "\n".join(batch_output) + "\n"
 
+            # cooldown delay between batches
+            time.sleep(random.uniform(8, 12))
+
+        # show failed links if any
         if failed_links:
-            yield f"\n⚠️ Failed links after retry: {json.dumps(failed_links)}\n"
-        yield "\n✅ All batches complete!\n"
+            yield f"\n⚠️ Failed to process these links:\n" + "\n".join(failed_links) + "\n"
+
+        yield "\n🎉 All batches completed successfully!\n"
 
     return Response(stream_with_context(generate()), mimetype="text/plain")
 
 
+@app.route("/")
+def home():
+    return "CrownTALK Comment Generator is live!"
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
