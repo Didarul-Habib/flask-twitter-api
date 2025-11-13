@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
-import requests, threading, time, random, math, gc
+import requests, threading, time, random, gc
 
 app = Flask(__name__)
 client = OpenAI()
@@ -44,7 +44,7 @@ def generate_comments_with_retry(prompt, max_retries=5):
 # ---------- HOME ----------
 @app.route("/")
 def home():
-    return "✅ CrownTALK — Stable & optimized comment engine."
+    return "✅ CrownTALK — Smart & Stable Comment Engine is running."
 
 
 # ---------- COMMENT ENDPOINT ----------
@@ -84,15 +84,14 @@ def comment():
             author = data.get("user_screen_name", "unknown")
 
             prompt = (
-                f"Write two short, natural human-like comments (5–10 words each) reacting to this tweet:\n"
+                f"Write two short, unique, natural human-like comments (5–10 words each) reacting to this tweet:\n"
                 f"---\n{tweet_text}\n---\n"
                 f"Rules:\n"
                 f"- No emojis, punctuation, hashtags, or quotes.\n"
                 f"- Avoid repetitive tone, phrasing, or structure.\n"
-                f"- Avoid words like love, feels, excited, finally, curious, this, looks, amazing, skip, feels like.\n"
-                f"- Each comment must sound distinct and casual.\n"
-                f"- Randomly use slang (rn, tbh, lowkey, fr, ngl) but not often.\n"
-                f"- Do NOT repeat word patterns across tweets.\n"
+                f"- Avoid using words: love, feels, excited, finally, curious, this, looks, amazing, skip, feels like.\n"
+                f"- Use slang sparingly (rn, tbh, lowkey, fr, ngl).\n"
+                f"- Must sound casual and distinct.\n"
                 f"- Must end cleanly without punctuation."
             )
 
@@ -152,7 +151,7 @@ def comment():
 
     formatted_output = ""
     for i, r in enumerate(all_results, start=1):
-        formatted_output += f"{i}. {r['url']}\n{r['comments']}\n{'─' * 40}\n"
+        formatted_output += f"{i}. [🔗 {r['url']}]({r['url']})\n{r['comments']}\n{'─' * 40}\n"
 
     return jsonify({
         "summary": f"✅ {len(all_results)} tweets processed. {len(failed_links)} failed after retry.",
