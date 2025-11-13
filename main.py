@@ -13,7 +13,7 @@ def keep_alive():
             print("✅ Ping sent to keep server awake.")
         except Exception as e:
             print("⚠️ Ping failed:", e)
-        time.sleep(15 * 60)  # every 15 min
+        time.sleep(15 * 60)  # every 15 minutes
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
@@ -28,8 +28,7 @@ def generate_comments_with_retry(prompt, max_retries=5):
                 messages=[{"role": "user", "content": prompt}],
                 timeout=60,
             )
-            text = response.choices[0].message.content.strip()
-            return text
+            return response.choices[0].message.content.strip()
         except Exception as e:
             print(f"⚠️ Attempt {attempt + 1}/{max_retries} failed: {e}")
             if "429" in str(e) or "Rate limit" in str(e):
@@ -38,14 +37,14 @@ def generate_comments_with_retry(prompt, max_retries=5):
                 time.sleep(wait)
             else:
                 time.sleep(random.uniform(3, 6))
-    print("❌ Max retries reached, skipping this one.")
+    print("❌ Max retries reached, skipping.")
     return None
 
 
 # ---------- HOME ----------
 @app.route("/")
 def home():
-    return "✅ CrownTALK — Comment engine stable & optimized."
+    return "✅ CrownTALK — Stable & optimized comment engine."
 
 
 # ---------- COMMENT ENDPOINT ----------
@@ -56,12 +55,15 @@ def comment():
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
+    # Enforce clean slicing for batching
+    urls = [u.strip() for u in urls if u.strip()]
     batch_size = 2
-    total_batches = math.ceil(len(urls) / batch_size)
-    all_results, failed_links = [], []
+    chunks = [urls[i:i + batch_size] for i in range(0, len(urls), batch_size)]
 
-    for batch_index in range(total_batches):
-        batch_urls = urls[batch_index * batch_size:(batch_index + 1) * batch_size]
+    all_results, failed_links = [], []
+    total_batches = len(chunks)
+
+    for batch_index, batch_urls in enumerate(chunks):
         print(f"🚀 Processing batch {batch_index + 1}/{total_batches}: {batch_urls}")
 
         for url in batch_urls:
@@ -82,23 +84,24 @@ def comment():
             author = data.get("user_screen_name", "unknown")
 
             prompt = (
-                f"Write two different short human-like comments (5–10 words each) reacting to this tweet:\n"
+                f"Write two short, natural human-like comments (5–10 words each) reacting to this tweet:\n"
                 f"---\n{tweet_text}\n---\n"
                 f"Rules:\n"
                 f"- No emojis, punctuation, hashtags, or quotes.\n"
-                f"- Avoid repetitive tone or structure.\n"
-                f"- Avoid words like love, feels, excited, finally, curious, this, looks, amazing.\n"
-                f"- Each comment must sound natural, unique, and casual.\n"
-                f"- Randomly use slang like rn, tbh, lowkey, fr, ngl—but not always.\n"
-                f"- Never repeat the same phrasing across tweets."
+                f"- Avoid repetitive tone, phrasing, or structure.\n"
+                f"- Avoid words like love, feels, excited, finally, curious, this, looks, amazing, skip, feels like.\n"
+                f"- Each comment must sound distinct and casual.\n"
+                f"- Randomly use slang (rn, tbh, lowkey, fr, ngl) but not often.\n"
+                f"- Do NOT repeat word patterns across tweets.\n"
+                f"- Must end cleanly without punctuation."
             )
 
-            comment_text = generate_comments_with_retry(prompt)
-            if comment_text:
+            comments = generate_comments_with_retry(prompt)
+            if comments:
                 all_results.append({
                     "author": author,
                     "url": url,
-                    "comments": comment_text
+                    "comments": comments
                 })
             else:
                 failed_links.append(url)
@@ -112,7 +115,7 @@ def comment():
             print(f"🕐 Cooling down for {rest_time:.1f}s...")
             time.sleep(rest_time)
 
-    # Retry failed ones once
+    # Retry failed links once
     if failed_links:
         print("🔁 Retrying failed links...")
         retry_results, still_failed = [], []
@@ -127,16 +130,16 @@ def comment():
 
                 tweet_text = data["text"]
                 prompt = (
-                    f"Write two distinct short human-like comments (5–10 words each) reacting to:\n"
+                    f"Write two short and distinct human-like comments (5–10 words each) for this tweet:\n"
                     f"{tweet_text}\n"
-                    f"No emojis, hashtags, or punctuation. No repeating words or tone."
+                    f"Strict rules: No emojis, hashtags, repetitive words, or punctuation."
                 )
 
-                comment_text = generate_comments_with_retry(prompt)
-                if comment_text:
+                comments = generate_comments_with_retry(prompt)
+                if comments:
                     retry_results.append({
                         "url": url,
-                        "comments": comment_text
+                        "comments": comments
                     })
                 else:
                     still_failed.append(url)
@@ -148,13 +151,13 @@ def comment():
         failed_links = still_failed
 
     formatted_output = ""
-    for r in all_results:
-        formatted_output += f"🔗 {r['url']}\n{r['comments']}\n{'─' * 40}\n"
+    for i, r in enumerate(all_results, start=1):
+        formatted_output += f"{i}. {r['url']}\n{r['comments']}\n{'─' * 40}\n"
 
     return jsonify({
         "summary": f"✅ {len(all_results)} tweets processed. {len(failed_links)} failed after retry.",
         "failed_links": failed_links,
-        "formatted": formatted_output[-2000:]
+        "formatted": formatted_output[-3000:]
     })
 
 
