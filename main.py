@@ -1,6 +1,6 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, stream_with_context, Response
 from openai import OpenAI
-import requests, threading, time, random, gc
+import requests, threading, time, random, gc, json
 
 app = Flask(__name__)
 client = OpenAI()
@@ -13,7 +13,7 @@ def keep_alive():
             print("✅ Ping sent to keep server awake.")
         except Exception as e:
             print("⚠️ Ping failed:", e)
-        time.sleep(15 * 60)  # every 15 minutes
+        time.sleep(15 * 60)
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
@@ -44,7 +44,7 @@ def generate_comments_with_retry(prompt, max_retries=5):
 # ---------- HOME ----------
 @app.route("/")
 def home():
-    return "✅ CrownTALK — Smart & Stable Comment Engine is running."
+    return "✅ CrownTALK — auto-batching, stable, and human-style comment engine is live."
 
 
 # ---------- COMMENT ENDPOINT ----------
@@ -55,109 +55,65 @@ def comment():
     if not urls:
         return jsonify({"error": "Please provide at least one tweet URL"}), 400
 
-    # Enforce clean slicing for batching
     urls = [u.strip() for u in urls if u.strip()]
     batch_size = 2
     chunks = [urls[i:i + batch_size] for i in range(0, len(urls), batch_size)]
-
-    all_results, failed_links = [], []
     total_batches = len(chunks)
 
-    for batch_index, batch_urls in enumerate(chunks):
-        print(f"🚀 Processing batch {batch_index + 1}/{total_batches}: {batch_urls}")
+    def generate():
+        all_results = []
+        failed_links = []
 
-        for url in batch_urls:
-            try:
-                api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
-                r = requests.get(api_url, timeout=12)
-                data = r.json()
-            except Exception as e:
-                print(f"❌ Failed to fetch {url}: {e}")
-                failed_links.append(url)
-                continue
+        for batch_index, batch_urls in enumerate(chunks):
+            print(f"🚀 Processing batch {batch_index + 1}/{total_batches}: {batch_urls}")
+            batch_output = ""
 
-            if "text" not in data:
-                failed_links.append(url)
-                continue
+            for url in batch_urls:
+                try:
+                    api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
+                    r = requests.get(api_url, timeout=12)
+                    data = r.json()
+                except Exception as e:
+                    failed_links.append(url)
+                    continue
 
-            tweet_text = data["text"]
-            author = data.get("user_screen_name", "unknown")
-
-            prompt = (
-                f"Write two short, unique, natural human-like comments (5–10 words each) reacting to this tweet:\n"
-                f"---\n{tweet_text}\n---\n"
-                f"Rules:\n"
-                f"- No emojis, punctuation, hashtags, or quotes.\n"
-                f"- Avoid repetitive tone, phrasing, or structure.\n"
-                f"- Avoid using words: love, feels, excited, finally, curious, this, looks, amazing, skip, feels like.\n"
-                f"- Use slang sparingly (rn, tbh, lowkey, fr, ngl).\n"
-                f"- Must sound casual and distinct.\n"
-                f"- Must end cleanly without punctuation."
-            )
-
-            comments = generate_comments_with_retry(prompt)
-            if comments:
-                all_results.append({
-                    "author": author,
-                    "url": url,
-                    "comments": comments
-                })
-            else:
-                failed_links.append(url)
-
-            time.sleep(random.uniform(1.5, 3))
-            gc.collect()
-
-        # Cooldown between batches
-        if batch_index < total_batches - 1:
-            rest_time = random.uniform(8, 12)
-            print(f"🕐 Cooling down for {rest_time:.1f}s...")
-            time.sleep(rest_time)
-
-    # Retry failed links once
-    if failed_links:
-        print("🔁 Retrying failed links...")
-        retry_results, still_failed = [], []
-        for url in failed_links:
-            try:
-                api_url = f"https://api.vxtwitter.com/{url.replace('https://', '')}"
-                r = requests.get(api_url, timeout=12)
-                data = r.json()
                 if "text" not in data:
-                    still_failed.append(url)
+                    failed_links.append(url)
                     continue
 
                 tweet_text = data["text"]
+
                 prompt = (
-                    f"Write two short and distinct human-like comments (5–10 words each) for this tweet:\n"
-                    f"{tweet_text}\n"
-                    f"Strict rules: No emojis, hashtags, repetitive words, or punctuation."
+                    f"Write two short, unique, human-like comments (5–10 words each) reacting to this tweet:\n"
+                    f"---\n{tweet_text}\n---\n"
+                    f"Rules:\n"
+                    f"- No emojis, punctuation, hashtags, or quotes.\n"
+                    f"- Avoid repetitive tone, phrasing, or structure.\n"
+                    f"- Avoid words: love, feels, excited, finally, curious, this, looks, amazing, skip, feels like.\n"
+                    f"- Use slang sparingly (rn, tbh, lowkey, fr, ngl).\n"
+                    f"- Must sound casual and distinct.\n"
+                    f"- Must end cleanly without punctuation."
                 )
 
                 comments = generate_comments_with_retry(prompt)
                 if comments:
-                    retry_results.append({
-                        "url": url,
-                        "comments": comments
-                    })
+                    result = f"🔗 [{url}]({url})\n{comments}\n{'─' * 40}\n"
+                    all_results.append(result)
+                    batch_output += result
                 else:
-                    still_failed.append(url)
-            except Exception as e:
-                print(f"⚠️ Retry failed for {url}: {e}")
-                still_failed.append(url)
+                    failed_links.append(url)
 
-        all_results.extend(retry_results)
-        failed_links = still_failed
+                time.sleep(random.uniform(1.5, 3))
+                gc.collect()
 
-    formatted_output = ""
-    for i, r in enumerate(all_results, start=1):
-        formatted_output += f"{i}. [🔗 {r['url']}]({r['url']})\n{r['comments']}\n{'─' * 40}\n"
+            yield f"Batch {batch_index + 1}/{total_batches} complete:\n{batch_output}\n"
+            time.sleep(random.uniform(8, 12))  # cooldown
 
-    return jsonify({
-        "summary": f"✅ {len(all_results)} tweets processed. {len(failed_links)} failed after retry.",
-        "failed_links": failed_links,
-        "formatted": formatted_output[-3000:]
-    })
+        if failed_links:
+            yield f"\n⚠️ Failed links after retry: {json.dumps(failed_links)}\n"
+        yield "\n✅ All batches complete!\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/plain")
 
 
 if __name__ == "__main__":
