@@ -1,66 +1,72 @@
 from flask import Flask, request, jsonify
-from openai import OpenAI, error as openai_error
+from openai import OpenAI
+import openai._exceptions as openai_error
 import re
 import time
 import os
-import random
 
 app = Flask(__name__)
-
-# Initialize client (no proxies arg — fixes that render error)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Utility: clean tweet URLs (remove query params)
+
+# ---------- Clean Tweet URL ----------
 def clean_tweet_url(url):
     return re.sub(r'\?.*$', '', url.strip())
 
-# Utility: exponential backoff handler for API calls
+
+# ---------- OpenAI Retry Handler ----------
 def call_openai_with_retry(payload, retries=5):
     for attempt in range(retries):
         try:
             return client.chat.completions.create(**payload)
         except openai_error.RateLimitError as e:
             wait_time = 60 * (attempt + 1)
-            print(f"[RateLimit] Hit limit. Waiting {wait_time}s before retry ({attempt+1}/{retries})...")
+            print(f"[429] Rate limit hit. Waiting {wait_time}s before retry...")
             time.sleep(wait_time)
+        except openai_error.APIError as e:
+            print(f"[API Error] {e}. Waiting before retry...")
+            time.sleep(10)
         except Exception as e:
             print(f"[Error] Attempt {attempt+1} failed: {e}")
-            time.sleep(3)
+            time.sleep(5)
     raise Exception("❌ All retry attempts failed for this batch.")
 
-@app.route('/')
-def home():
-    return "✅ CrownTALK Comment Generator API is live."
 
-@app.route('/comment', methods=['POST'])
+@app.route("/")
+def home():
+    return "✅ CrownTALK API active and stable."
+
+
+@app.route("/comment", methods=["POST"])
 def comment():
     try:
         data = request.get_json()
         urls = data.get("urls", [])
 
         if not urls or not isinstance(urls, list):
-            return jsonify({"error": "Missing or invalid 'urls' field"}), 400
+            return jsonify({"error": "Missing or invalid 'urls' list"}), 400
 
-        # Clean and limit to safe batch size
+        # Clean & limit batch size
         urls = [clean_tweet_url(u) for u in urls if u.strip()]
         if len(urls) > 2:
-            urls = urls[:2]  # Should never happen, but just in case
+            urls = urls[:2]
 
         formatted_output = ""
         failed_links = []
         batch_num = 1
-        total_batches = 1  # Only one batch per call now
+        total_batches = 1
 
         print(f"Processing batch {batch_num}/{total_batches}: {urls}")
 
+        # Build prompt
         prompt = (
-            "You are CrownTALK — an AI that writes short, engaging, human-style comments for tweets. "
-            "For each tweet link provided, generate two unique replies that sound natural, avoid repetition, "
-            "and match the tone of casual X (Twitter) engagement. Use friendly emojis where suitable, but not every line. "
-            "Skip phrases like 'game changer' or 'can’t wait to see'. Keep it fresh and varied.\n\n"
+            "You are CrownTALK — an AI that writes short, natural, human-like comments for tweets. "
+            "Generate two comments per tweet that sound authentic and conversational. "
+            "Do not use repeated patterns or overused words like 'game changer', 'finally', 'love to see', 'curious', 'excited', or 'can't wait'. "
+            "Keep every comment between 4 and 10 words, no punctuation at the end, and avoid starting with the same few words. "
+            "For example: 'lowkey this looks next level' or 'tbh that’s a solid move'.\n\n"
         )
 
-        # Add tweet URLs to prompt
         for url in urls:
             prompt += f"Tweet: {url}\nComments:\n"
 
@@ -89,14 +95,13 @@ def comment():
 
         if response and response.choices:
             text = response.choices[0].message.content.strip()
-            formatted_output += "\n\n".join([
-                f"🔗 {url}\n{text.split('Tweet: ')[-1].strip()}\n" for url in urls
-            ])
+            for url in urls:
+                formatted_output += f"🔗 {url}\n{text}\n" + ("─" * 40) + "\n"
 
         return jsonify({
             "summary": f"✅ Completed {batch_num}/{total_batches} batch(es).",
             "failed_links": failed_links,
-            "formatted": formatted_output
+            "formatted": formatted_output.strip()
         }), 200
 
     except Exception as e:
@@ -104,5 +109,5 @@ def comment():
         return jsonify({"error": str(e)}), 500
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
