@@ -1,13 +1,14 @@
 # ----------------------------------------------------
-# FORCE CORRECT OPENAI VERSION ON RENDER
+# HARD-LOCK OPENAI VERSION (Render-proof)
 # ----------------------------------------------------
 import os
-os.system("pip uninstall -y openai > /dev/null 2>&1")
-os.system("pip install openai==1.43.1 > /dev/null 2>&1")
+import subprocess
 
-# ----------------------------------------------------
-# REMOVE RENDER PROXIES (fixes OpenAI proxy injection bug)
-# ----------------------------------------------------
+# Delete wrong version if Render installs it
+subprocess.run("pip uninstall -y openai", shell=True)
+subprocess.run("pip install openai==1.43.1", shell=True)
+
+# Remove Render global proxy variables (fixes Client(proxies) bug)
 for p in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
     if p in os.environ:
         del os.environ[p]
@@ -27,7 +28,7 @@ from openai import OpenAI
 # INIT
 # ----------------------------------------------------
 app = Flask(__name__)
-client = OpenAI()   # works correctly with 1.43.1
+client = OpenAI()  # now 100% safe
 
 
 # ----------------------------------------------------
@@ -39,14 +40,14 @@ def keep_awake():
             requests.get("https://crowntalk-v2-0.onrender.com")
         except:
             pass
-        time.sleep(300)  # ping every 5 min
+        time.sleep(300)
 
 
 threading.Thread(target=keep_awake, daemon=True).start()
 
 
 # ----------------------------------------------------
-# FETCH TWEET TEXT FROM VX TWITTER API
+# FETCH TWEET TEXT
 # ----------------------------------------------------
 def get_tweet_text(url):
     try:
@@ -65,7 +66,7 @@ def get_tweet_text(url):
 
 
 # ----------------------------------------------------
-# GENERATE AI COMMENTS USING GPT-4O-MINI (1.43.1 COMPATIBLE)
+# AI COMMENT GENERATOR
 # ----------------------------------------------------
 def generate_comments(tweet_text):
     prompt = f"""
@@ -73,10 +74,12 @@ Generate two humanlike comments.
 Rules:
 - 5–12 words each
 - no punctuation at end
-- no emojis, no hashtags
-- natural slang allowed (tbh, fr, ngl, btw, lowkey)
-- comments must be different and based on the tweet
-- exactly 2 lines, no labels
+- no emojis
+- no hashtags
+- natural slang allowed (tbh, fr, ngl, lowkey)
+- comments must be different
+- based on tweet
+- exactly 2 lines
 
 Tweet:
 {tweet_text}
@@ -121,7 +124,6 @@ def comment_api():
     if not urls:
         return jsonify({"error": "No URLs provided"}), 400
 
-    # Clean URLs — remove duplicates and ? queries
     clean_urls = []
     for u in urls:
         u = u.strip()
@@ -132,7 +134,6 @@ def comment_api():
     results = []
     failed = []
 
-    # BATCH SIZE = 2
     for i in range(0, len(clean_urls), 2):
         batch = clean_urls[i:i + 2]
 
@@ -143,6 +144,7 @@ def comment_api():
                 continue
 
             comments = generate_comments(txt)
+
             results.append({
                 "url": url,
                 "comments": comments,
