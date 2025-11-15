@@ -6,15 +6,12 @@ import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
 
-# ----------------------------------------------------
-# Flask + OpenAI
-# ----------------------------------------------------
 app = Flask(__name__)
 client = OpenAI()
 
-# ----------------------------------------------------
-# Keep alive ping for Render free tier
-# ----------------------------------------------------
+# -------------------------
+# Keep Render awake
+# -------------------------
 RENDER_URL = "https://crowntalk-v2-0.onrender.com"
 
 def keep_alive():
@@ -27,18 +24,20 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-# ----------------------------------------------------
-# Fetch tweet content using VX API
-# ----------------------------------------------------
+# -------------------------
+# Fetch tweet text (VX API)
+# -------------------------
 def get_tweet_text(url):
     try:
         clean = url.replace("https://", "").replace("http://", "")
         api = f"https://api.vxtwitter.com/{clean}"
+
         r = requests.get(api, timeout=10)
         d = r.json()
 
         if "tweet" in d and "text" in d["tweet"]:
             return d["tweet"]["text"]
+
         if "text" in d:
             return d["text"]
 
@@ -46,20 +45,20 @@ def get_tweet_text(url):
     except:
         return None
 
-# ----------------------------------------------------
-# Generate AI comments (retry logic)
-# ----------------------------------------------------
+# -------------------------
+# Generate comments
+# -------------------------
 def generate_comments(text):
     prompt = f"""
 Generate two humanlike comments based on this tweet.
 
 Rules:
 - 5–12 words each
-- no emojis
 - no hashtags
-- no punctuation at end
-- make them different and natural
-- exactly two lines
+- no emojis
+- no punctuation
+- different tone each
+- exactly 2 lines output
 
 Tweet:
 {text}
@@ -67,18 +66,18 @@ Tweet:
 
     for attempt in range(4):
         try:
-            r = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 temperature=0.65,
-                max_tokens=60,
+                max_tokens=70,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            raw = r.choices[0].message.content.strip().split("\n")
-            cleaned = []
+            out = resp.choices[0].message.content.strip().split("\n")
 
-            for c in raw:
-                c = re.sub(r"[.,!?;:]+$", "", c.strip())
+            cleaned = []
+            for c in out:
+                c = re.sub(r"[.,!?;:]+$", "", c)
                 if 5 <= len(c.split()) <= 12:
                     cleaned.append(c)
 
@@ -87,33 +86,34 @@ Tweet:
 
         except Exception as e:
             print("AI error:", e)
-            time.sleep(1.5)
+            time.sleep(2)
 
-    return ["generation failed", "please retry"]
+    return ["generation failed", "retry later"]
 
-# ----------------------------------------------------
+# -------------------------
 # Routes
-# ----------------------------------------------------
+# -------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "CrownTALK backend running"})
+    return jsonify({"status": "CrownTALK backend OK"})
 
 @app.route("/comment", methods=["POST"])
 def comment_api():
-    body = request.json
+    body = request.json or {}
     urls = body.get("urls", [])
 
     if not urls:
-        return jsonify({"error": "No URLs"}), 400
+        return jsonify({"error": "No URLs provided"}), 400
 
     clean = []
     for u in urls:
-        u = re.sub(r"\?.*$", "", u.strip())
+        u = u.strip()
+        u = re.sub(r"\?.*$", "", u)
         if u not in clean:
             clean.append(u)
 
     results = []
-    failed = []
+    fails = []
 
     for i in range(0, len(clean), 2):
         batch = clean[i:i+2]
@@ -121,7 +121,7 @@ def comment_api():
         for url in batch:
             txt = get_tweet_text(url)
             if not txt:
-                failed.append(url)
+                fails.append(url)
                 continue
 
             comments = generate_comments(txt)
@@ -129,10 +129,9 @@ def comment_api():
 
         time.sleep(2)
 
-    return jsonify({"results": results, "failed": failed})
+    return jsonify({"results": results, "failed": fails})
 
-# ----------------------------------------------------
-# Run server
-# ----------------------------------------------------
+# -------------------------
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
