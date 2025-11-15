@@ -1,38 +1,29 @@
-# ----------------------------------------------------
-# HARD-LOCK OPENAI VERSION (Render-proof)
-# ----------------------------------------------------
 import os
-import subprocess
-
-# Delete wrong version if Render installs it
-subprocess.run("pip uninstall -y openai", shell=True)
-subprocess.run("pip install openai==1.43.1", shell=True)
-
-# Remove Render global proxy variables (fixes Client(proxies) bug)
-for p in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
-    if p in os.environ:
-        del os.environ[p]
-
-# ----------------------------------------------------
-# IMPORTS
-# ----------------------------------------------------
 import time
 import re
 import threading
 import requests
 from flask import Flask, request, jsonify
-from openai import OpenAI
 
 
 # ----------------------------------------------------
-# INIT
+# REMOVE PROXY VARIABLES (Render injects them)
 # ----------------------------------------------------
+for p in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    if p in os.environ:
+        del os.environ[p]
+
+
+# ----------------------------------------------------
+# CONFIG
+# ----------------------------------------------------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 app = Flask(__name__)
-client = OpenAI()  # now 100% safe
 
 
 # ----------------------------------------------------
-# KEEP RENDER AWAKE
+# RENDER KEEP-ALIVE
 # ----------------------------------------------------
 def keep_awake():
     while True:
@@ -47,7 +38,7 @@ threading.Thread(target=keep_awake, daemon=True).start()
 
 
 # ----------------------------------------------------
-# FETCH TWEET TEXT
+# FETCH TWEET TEXT (VX API)
 # ----------------------------------------------------
 def get_tweet_text(url):
     try:
@@ -66,7 +57,7 @@ def get_tweet_text(url):
 
 
 # ----------------------------------------------------
-# AI COMMENT GENERATOR
+# OPENAI REST API (NO CLIENT)
 # ----------------------------------------------------
 def generate_comments(tweet_text):
     prompt = f"""
@@ -74,32 +65,54 @@ Generate two humanlike comments.
 Rules:
 - 5–12 words each
 - no punctuation at end
-- no emojis
-- no hashtags
+- no emojis or hashtags
 - natural slang allowed (tbh, fr, ngl, lowkey)
 - comments must be different
-- based on tweet
+- based on the tweet
 - exactly 2 lines
 
 Tweet:
 {tweet_text}
 """
 
+    payload = {
+        "model": "gpt-4o-mini",
+        "temperature": 0.65,
+        "max_tokens": 60,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     for attempt in range(4):
         try:
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                temperature=0.65,
-                max_tokens=60,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            r = requests.post("https://api.openai.com/v1/chat/completions",
+                              json=payload,
+                              headers=headers,
+                              timeout=20)
 
-            out = resp.choices[0].message.content.strip().split("\n")
-            out = [re.sub(r"[.,!?;:]+$", "", c).strip() for c in out]
-            out = [c for c in out if 5 <= len(c.split()) <= 12]
+            data = r.json()
 
-            if len(out) >= 2:
-                return out[:2]
+            if "choices" not in data:
+                time.sleep(1)
+                continue
+
+            output = data["choices"][0]["message"]["content"]
+            lines = [l.strip() for l in output.split("\n") if l.strip()]
+
+            clean = []
+            for c in lines:
+                c = re.sub(r"[.,!?;:]+$", "", c)
+                if 5 <= len(c.split()) <= 12:
+                    clean.append(c)
+
+            if len(clean) >= 2:
+                return clean[:2]
 
         except Exception as e:
             print("AI error:", e)
@@ -126,8 +139,7 @@ def comment_api():
 
     clean_urls = []
     for u in urls:
-        u = u.strip()
-        u = re.sub(r"\?.*$", "", u)
+        u = re.sub(r"\?.*$", "", u.strip())
         if u not in clean_urls:
             clean_urls.append(u)
 
@@ -144,13 +156,12 @@ def comment_api():
                 continue
 
             comments = generate_comments(txt)
-
             results.append({
                 "url": url,
-                "comments": comments,
+                "comments": comments
             })
 
-        time.sleep(3)
+        time.sleep(2)
 
     return jsonify({
         "results": results,
