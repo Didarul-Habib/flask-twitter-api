@@ -1,113 +1,161 @@
-from flask import Flask, request, jsonify
-from openai import OpenAI
-import openai._exceptions as openai_error
-import re
-import time
 import os
 
+# ----------------------------------------------------
+# ABSOLUTELY BLOCK ALL PROXY VARIABLES (Render injects hidden ones)
+# ----------------------------------------------------
+for p in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
+    if p in os.environ:
+        del os.environ[p]
+
+# ALSO block httpx auto-detection
+os.environ["NO_PROXY"] = "*"
+os.environ["no_proxy"] = "*"
+
+
+import time
+import re
+import threading
+import requests
+from flask import Flask, request, jsonify
+from openai import OpenAI
+
+
+# ----------------------------------------------------
+# Init Flask + OpenAI
+# ----------------------------------------------------
 app = Flask(__name__)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI()   # now safe — no proxies will be passed
 
 
-# ---------- Clean Tweet URL ----------
-def clean_tweet_url(url):
-    return re.sub(r'\?.*$', '', url.strip())
+# ----------------------------------------------------
+# Keep-alive ping (Render free tier)
+# ----------------------------------------------------
+RENDER_URL = "https://crowntalk-v2-0.onrender.com"
 
-
-# ---------- OpenAI Retry Handler ----------
-def call_openai_with_retry(payload, retries=5):
-    for attempt in range(retries):
+def keep_alive():
+    while True:
         try:
-            return client.chat.completions.create(**payload)
-        except openai_error.RateLimitError as e:
-            wait_time = 60 * (attempt + 1)
-            print(f"[429] Rate limit hit. Waiting {wait_time}s before retry...")
-            time.sleep(wait_time)
-        except openai_error.APIError as e:
-            print(f"[API Error] {e}. Waiting before retry...")
-            time.sleep(10)
+            requests.get(RENDER_URL, timeout=6)
+        except:
+            pass
+        time.sleep(600)
+
+threading.Thread(target=keep_alive, daemon=True).start()
+
+
+# ----------------------------------------------------
+# Tweet Text Fetcher
+# ----------------------------------------------------
+def get_tweet_text(url):
+    try:
+        clean = url.replace("https://", "").replace("http://", "")
+        api = f"https://api.vxtwitter.com/{clean}"
+
+        r = requests.get(api, timeout=10)
+        d = r.json()
+
+        if "tweet" in d and "text" in d["tweet"]:
+            return d["tweet"]["text"]
+
+        if "text" in d:
+            return d["text"]
+
+        return None
+    except:
+        return None
+
+
+# ----------------------------------------------------
+# AI Comment Generator (2 comments, retry)
+# ----------------------------------------------------
+def generate_comments(text):
+    prompt = f"""
+Generate two natural human comments based on this tweet.
+
+Rules:
+- 5–12 words each
+- no emojis
+- no hashtags
+- no punctuation at end
+- casual tone
+- each comment in new line
+
+Tweet:
+{text}
+"""
+
+    for attempt in range(4):
+        try:
+            r = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.65,
+                max_tokens=60,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            raw = r.choices[0].message.content.strip()
+            lines = [x.strip() for x in raw.split("\n") if x.strip()]
+
+            cleaned = []
+            for c in lines:
+                c = re.sub(r"[.,!?;:]+$", "", c)
+                if 5 <= len(c.split()) <= 12:
+                    cleaned.append(c)
+
+            if len(cleaned) >= 2:
+                return cleaned[:2]
+
         except Exception as e:
-            print(f"[Error] Attempt {attempt+1} failed: {e}")
-            time.sleep(5)
-    raise Exception("❌ All retry attempts failed for this batch.")
+            print("AI attempt failed:", e)
+            time.sleep(1.5)
+
+    return ["generation failed", "please retry"]
 
 
+# ----------------------------------------------------
+# API Routes
+# ----------------------------------------------------
 @app.route("/")
 def home():
-    return "✅ CrownTALK API active and stable."
+    return jsonify({"status": "CrownTALK backend online"})
 
 
 @app.route("/comment", methods=["POST"])
-def comment():
-    try:
-        data = request.get_json()
-        urls = data.get("urls", [])
+def comment_api():
+    body = request.json
+    urls = body.get("urls", [])
 
-        if not urls or not isinstance(urls, list):
-            return jsonify({"error": "Missing or invalid 'urls' list"}), 400
+    if not urls:
+        return jsonify({"error": "No URLs"}), 400
 
-        # Clean & limit batch size
-        urls = [clean_tweet_url(u) for u in urls if u.strip()]
-        if len(urls) > 2:
-            urls = urls[:2]
+    clean = []
+    for u in urls:
+        u = re.sub(r"\?.*$", "", u.strip())
+        if u not in clean:
+            clean.append(u)
 
-        formatted_output = ""
-        failed_links = []
-        batch_num = 1
-        total_batches = 1
+    results = []
+    failed = []
 
-        print(f"Processing batch {batch_num}/{total_batches}: {urls}")
+    for i in range(0, len(clean), 2):
+        batch = clean[i:i+2]
 
-        # Build prompt
-        prompt = (
-            "You are CrownTALK — an AI that writes short, natural, human-like comments for tweets. "
-            "Generate two comments per tweet that sound authentic and conversational. "
-            "Do not use repeated patterns or overused words like 'game changer', 'finally', 'love to see', 'curious', 'excited', or 'can't wait'. "
-            "Keep every comment between 4 and 10 words, no punctuation at the end, and avoid starting with the same few words. "
-            "For example: 'lowkey this looks next level' or 'tbh that’s a solid move'.\n\n"
-        )
+        for url in batch:
+            txt = get_tweet_text(url)
+            if not txt:
+                failed.append(url)
+                continue
 
-        for url in urls:
-            prompt += f"Tweet: {url}\nComments:\n"
+            comments = generate_comments(txt)
+            results.append({"url": url, "comments": comments})
 
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.9,
-            "max_tokens": 300
-        }
+        time.sleep(2)
 
-        try:
-            response = call_openai_with_retry(payload)
-        except Exception as e:
-            print(f"[Fallback Triggered] {e}")
-            try:
-                payload["model"] = "gpt-3.5-turbo"
-                response = call_openai_with_retry(payload)
-            except Exception as e2:
-                print(f"[Final Fail] {e2}")
-                failed_links.extend(urls)
-                return jsonify({
-                    "summary": f"❌ All attempts failed for {len(urls)} tweets.",
-                    "failed_links": failed_links,
-                    "formatted": formatted_output
-                }), 500
-
-        if response and response.choices:
-            text = response.choices[0].message.content.strip()
-            for url in urls:
-                formatted_output += f"🔗 {url}\n{text}\n" + ("─" * 40) + "\n"
-
-        return jsonify({
-            "summary": f"✅ Completed {batch_num}/{total_batches} batch(es).",
-            "failed_links": failed_links,
-            "formatted": formatted_output.strip()
-        }), 200
-
-    except Exception as e:
-        print(f"[Server Error] {e}")
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"results": results, "failed": failed})
 
 
+# ----------------------------------------------------
+# Run Server
+# ----------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    app.run(host="0.0.0.0", port=10000)
