@@ -1,17 +1,4 @@
 import os
-
-# ----------------------------------------------------
-# ABSOLUTELY BLOCK ALL PROXY VARIABLES (Render injects hidden ones)
-# ----------------------------------------------------
-for p in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
-    if p in os.environ:
-        del os.environ[p]
-
-# ALSO block httpx auto-detection
-os.environ["NO_PROXY"] = "*"
-os.environ["no_proxy"] = "*"
-
-
 import time
 import re
 import threading
@@ -19,16 +6,14 @@ import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
 
-
 # ----------------------------------------------------
-# Init Flask + OpenAI
+# Flask + OpenAI
 # ----------------------------------------------------
 app = Flask(__name__)
-client = OpenAI()   # now safe — no proxies will be passed
-
+client = OpenAI()
 
 # ----------------------------------------------------
-# Keep-alive ping (Render free tier)
+# Keep alive ping for Render free tier
 # ----------------------------------------------------
 RENDER_URL = "https://crowntalk-v2-0.onrender.com"
 
@@ -42,21 +27,18 @@ def keep_alive():
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-
 # ----------------------------------------------------
-# Tweet Text Fetcher
+# Fetch tweet content using VX API
 # ----------------------------------------------------
 def get_tweet_text(url):
     try:
         clean = url.replace("https://", "").replace("http://", "")
         api = f"https://api.vxtwitter.com/{clean}"
-
         r = requests.get(api, timeout=10)
         d = r.json()
 
         if "tweet" in d and "text" in d["tweet"]:
             return d["tweet"]["text"]
-
         if "text" in d:
             return d["text"]
 
@@ -64,21 +46,20 @@ def get_tweet_text(url):
     except:
         return None
 
-
 # ----------------------------------------------------
-# AI Comment Generator (2 comments, retry)
+# Generate AI comments (retry logic)
 # ----------------------------------------------------
 def generate_comments(text):
     prompt = f"""
-Generate two natural human comments based on this tweet.
+Generate two humanlike comments based on this tweet.
 
 Rules:
 - 5–12 words each
 - no emojis
 - no hashtags
 - no punctuation at end
-- casual tone
-- each comment in new line
+- make them different and natural
+- exactly two lines
 
 Tweet:
 {text}
@@ -93,12 +74,11 @@ Tweet:
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            raw = r.choices[0].message.content.strip()
-            lines = [x.strip() for x in raw.split("\n") if x.strip()]
-
+            raw = r.choices[0].message.content.strip().split("\n")
             cleaned = []
-            for c in lines:
-                c = re.sub(r"[.,!?;:]+$", "", c)
+
+            for c in raw:
+                c = re.sub(r"[.,!?;:]+$", "", c.strip())
                 if 5 <= len(c.split()) <= 12:
                     cleaned.append(c)
 
@@ -106,19 +86,17 @@ Tweet:
                 return cleaned[:2]
 
         except Exception as e:
-            print("AI attempt failed:", e)
+            print("AI error:", e)
             time.sleep(1.5)
 
     return ["generation failed", "please retry"]
 
-
 # ----------------------------------------------------
-# API Routes
+# Routes
 # ----------------------------------------------------
 @app.route("/")
 def home():
-    return jsonify({"status": "CrownTALK backend online"})
-
+    return jsonify({"status": "CrownTALK backend running"})
 
 @app.route("/comment", methods=["POST"])
 def comment_api():
@@ -153,9 +131,8 @@ def comment_api():
 
     return jsonify({"results": results, "failed": failed})
 
-
 # ----------------------------------------------------
-# Run Server
+# Run server
 # ----------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
